@@ -3,7 +3,7 @@
   "note": "Versions this kit was last reconciled against. Update only after a human read the upstream diff and confirmed the mechanism still holds.",
   "components": {
     "claude_code": {
-      "version": "2.0.0",
+      "version": "2.1.326",
       "compare": "major.minor",
       "source": "https://registry.npmjs.org/@anthropic-ai/claude-code/latest",
       "why_it_matters": "peer registry fields (pid / procStart / cwd / entrypoint / messagingSocketPath), CLAUDE_CODE_ENTRYPOINT semantics, SendMessage addressing"
