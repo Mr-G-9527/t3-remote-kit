@@ -2,8 +2,10 @@
 
 `SendMessage` addresses peers by name, but names drift (auto-generated on first message,
 changed by `/rename`, gone after archive) and pids get reused. Stable identity is the
-**role** (repo + role + entrypoint, see `config/peers.json`); the name is only the handle
-valid at the moment you send.
+**role**: `cwd_match` (a path fragment) + `entrypoints` (the entry type), see
+`config/peers.json`. The `repo` field there is informational - it cannot be a hard
+constraint, because a T3 thread runs in a worktree outside the repo path. The name is
+only the handle valid at the moment you send.
 
 This script:
 1. mirrors the registries first (unless `--no-mirror`) — the other harness rewrites its own
@@ -40,6 +42,7 @@ from peer_mirror import entries, load_roles, mirror  # noqa: E402
 
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 STILL_ACTIVE = 259
+ERROR_ACCESS_DENIED = 5
 
 
 class FILETIME(ctypes.Structure):
@@ -58,17 +61,38 @@ def proc_alive(pid: int, proc_start) -> bool:
     return proc_state(pid, proc_start) in ("alive", "unknown")
 
 
+def as_pid(payload: dict):
+    """The registry's pid, tolerating a numeric string.
+
+    If upstream changes the field type, `int(pid)` keeps working instead of making the
+    entry invisible (an invisible entry would read as "peer offline" and stay green).
+    """
+    pid = payload.get("pid")
+    if isinstance(pid, bool):
+        return None
+    if isinstance(pid, int):
+        return pid
+    if isinstance(pid, str) and pid.strip().isdigit():
+        return int(pid.strip())
+    return None
+
+
 def proc_state(pid: int, proc_start) -> str:
     """Liveness with a reason, so the health probe can tell problems apart.
 
     - alive     : the process runs and its creation time matches the registry
     - unknown   : the process runs but the registry has no `procStart` to compare
+                  (the pid-reuse guard is OFF for this entry - that is not "healthy")
     - mismatch  : the process runs but its creation time differs -> either the pid was
                   reused, or the registry field semantics changed (that is a mechanism
                   break, not a stale entry)
+    - denied    : the process exists but we may not open it (another user / session)
     - dead      : the process is gone
-    - gone      : no such process / cannot open it
+    - gone      : no such process
+    - unsupported: this platform has no Windows process API (see `windows_only`)
     """
+    if os.name != "nt":
+        return "unsupported"
     kernel32 = ctypes.windll.kernel32
     kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
     kernel32.OpenProcess.restype = ctypes.c_void_p
@@ -79,6 +103,9 @@ def proc_state(pid: int, proc_start) -> str:
 
     handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
+        # NULL means "denied" as well as "absent" - check the error code before giving up
+        if kernel32.GetLastError() == ERROR_ACCESS_DENIED:
+            return "denied"
         return "gone"
     try:
         creation, exit_t, kernel_t, user_t = (FILETIME() for _ in range(4))
@@ -163,13 +190,13 @@ def find(role: str, spec: dict) -> list[dict]:
     seen: set[int] = set()
     for config_dir in peer_mirror.CONFIG_DIRS:
         for _js, _key, payload in entries(config_dir):
-            pid = payload.get("pid")
-            if not isinstance(pid, int) or pid in seen:
+            pid = as_pid(payload)
+            if pid is None or pid in seen:
                 continue
             if not match(payload, spec):
                 continue
             state = proc_state(pid, payload.get("procStart"))
-            if state in ("dead", "gone"):
+            if state in ("dead", "gone", "denied", "unsupported"):
                 continue
             seen.add(pid)
             local = read_entry(cdir / "sessions" / f"{pid}.json")
@@ -199,10 +226,10 @@ def find_by_pid(pid: int) -> list[dict]:
     seen: set[int] = set()
     for config_dir in peer_mirror.CONFIG_DIRS:
         for _js, _key, payload in entries(config_dir):
-            if payload.get("pid") != pid or pid in seen:
+            if as_pid(payload) != pid or pid in seen:
                 continue
             state = proc_state(pid, payload.get("procStart"))
-            if state in ("dead", "gone"):
+            if state in ("dead", "gone", "denied", "unsupported"):
                 continue
             seen.add(pid)
             local = read_entry(cdir / "sessions" / f"{pid}.json")
@@ -242,6 +269,13 @@ def main() -> int:
 
     if args.role is None and args.pid is None:
         ap.error("give --role or --pid")
+    if os.name != "nt":
+        print(
+            "this kit's liveness probe needs Windows (NTFS junctions, named pipes, "
+            "Windows process APIs). On this platform the peer registry cannot be checked.",
+            file=sys.stderr,
+        )
+        return 2
     if args.config_dir:
         peer_mirror.set_config_dirs(args.config_dir)
     if args.roles:

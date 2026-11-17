@@ -134,6 +134,7 @@ class PeerChannelTests(unittest.TestCase):
         m.assert_not_called()
         self.assertEqual(rc, 1)  # no live peer -> rc 1, but nothing was written
 
+    @unittest.skipUnless(os.name == "nt", "Windows process APIs only")
     def test_proc_alive_rejects_mismatched_proc_start(self):
         # a short-lived child: alive, but a wrong procStart must read as dead (pid reuse guard)
         import subprocess

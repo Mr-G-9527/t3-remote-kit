@@ -1,7 +1,7 @@
 # 跨 session 对讲通道（peer channel）
 
 > **何时读**：要给另一个 session 发消息（手机上的线程 ↔ 桌面的 session）。
-> **真源**：`config/peers.json`（角色 = 仓 + 角色 + 入口类型）。
+> **真源**：`config/peers.json`（角色 = `cwd_match`（路径片段）+ `entrypoints`（入口类型））。
 > **实现**：`tools/peer_resolve.py` / `peer_mirror.py` / `peer_health.py`。
 
 ## 为什么不是「记住对方的名字」
@@ -76,7 +76,12 @@ New-Item -ItemType Junction -Path "<隔离配置目录>\sessions" -Target "$env:
    但要知道 `peer_mirror.py` 会把 `<pid>.<token>.key` 一起抄过去（对端要靠它才能被寻址），
    且写入用**原子替换**（临时文件 + rename），对面不会读到半截 JSON。
 6. **角色匹配是按路径「段」比**：`cwd_match: "my-repo"` 不会匹配 `my-repo-2`，但会匹配
-   `archive\my-repo`（段级包含）。要精确到某个 checkout，就把 `cwd_match` 写全路径。
+   `archive\my-repo`（段级包含）。要精确到某个 checkout，就把 `cwd_match` 写全路径
+   （`C:\ws\my-repo` → 只匹配这个 checkout）。
+   `repo` 字段只是给人看的说明——T3 线程跑在仓库路径之外的 worktree 里，它没法当硬约束。
+7. **镜像的「新鲜度」比的是文件内容，不是时间戳**：`updatedAt` 不在我们依赖的字段清单里，
+   上游一旦改名/删掉它，镜像就会永远停在第一次拷贝的状态（名字过期、pid 守卫用旧值）。
+   内容不同才拷贝 → 不会冻住。
 
 ## 双方各要做的一件事
 
@@ -91,13 +96,13 @@ New-Item -ItemType Junction -Path "<隔离配置目录>\sessions" -Target "$env:
 
 | 状态 | 含义 | 该不该让监控红 |
 |---|---|---|
-| `ok` | 机制正常，有活着的 peer | 否 |
-| `offline` | 机制正常，只是当前没人在线 | 否 |
-| `degraded` | 机制正常，但注册表有陈旧条目（死 pid） | 否 |
-| `error` | **机制坏了**：角色表读不到 / 配置目录缺失 / 镜像失败 / **session 活着但注册表里的创建时间对不上** | **是** |
+| `ok` | 机制正常，且**有活着的 peer**（旁边有几个死 pid 不影响） | 否 |
+| `offline` | 机制正常，只是当前没人在线；或这台机器还没装这套（没有注册表目录） | 否 |
+| `degraded` | 机制正常，没有活着的 peer，但注册表里还有陈旧条目（该清理） | 否 |
+| `error` | **机制坏了**：角色表读不到 / 镜像失败 / 注册表 `pid` 不是数字 / 压根没有 `procStart`（pid 复用守卫没开）/ session 活着但创建时间对不上 / 进程打不开（权限不足） | **是** |
 
-最后一条是关键：上游改了 registry 字段语义时，session 还活着却再也校验不过，
-那不是「陈旧条目」，是**守卫失效**——必须报 `error`，否则整套对讲会静默死掉而监控全绿。
+最后几条是关键：上游改了 registry 字段语义时，session 还活着却再也校验不过（或守卫根本
+没开），那不是「陈旧条目」，是**守卫失效**——必须报 `error`，否则整套对讲会静默死掉而监控全绿。
 
 消息链路本身（`SendMessage` 能不能送达）不在这个探针里 —— 脚本没有 `SendMessage` 能力，
 那一步只能由 agent 真发一条 ping 来验。

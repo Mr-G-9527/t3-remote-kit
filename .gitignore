@@ -3,5 +3,4 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
-config/peers.local.json
 *.log

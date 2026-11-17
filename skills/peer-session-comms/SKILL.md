@@ -23,7 +23,7 @@ description: 跨 harness 对讲（手机 T3 线程 ↔ 桌面 CLI session）。�
 session 名会自动生成、会被 `/rename` 改、archive 后就没了；pid 会复用。**名字的生命周期比想象短**，
 所以：
 
-- 角色表 `config/peers.json` 是唯一真源：`role → {repo, cwd_match, entrypoints}`。
+- 角色表 `config/peers.json` 是唯一真源：`role → {cwd_match, entrypoints}`（`repo` 只是说明字段）。
 - **每次发送前现解析**，解析出的名字直接喂 `SendMessage`，不缓存：
 
 ```bash

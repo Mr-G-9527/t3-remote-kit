@@ -2,16 +2,21 @@
 
 It reports whether the **mechanism** is healthy, not who is online:
 
-- ok       mechanism fine and at least one live peer session
-- offline  mechanism fine, but no live peer right now (normal, not a fault)
-- degraded mechanism fine, but the registry holds stale entries (dead pids; harmless)
-- error    mechanism broken: roles table unreadable / config dir missing / mirroring failed /
-           **a session whose creation time does not match the registry** (that means either the
-           pid was reused or the registry field semantics changed upstream — either way this
-           kit's central guard stopped working, so it must not be reported as "just stale")
+- ok       mechanism fine AND at least one live peer session
+- offline  mechanism fine, nobody live right now (normal, not a fault). Also the state of a
+           machine where the channel was never set up (no registry dir yet)
+- degraded mechanism fine, no live peer, but the registry still holds entries (dead pids to
+           clean up). A live peer plus some dead pids is still `ok` - dead pids are normal
+- error    mechanism broken. That includes the shapes an upstream change would produce:
+             - roles table unreadable / config dir unreadable
+             - registry entries whose `pid` is not a number (field type changed)
+             - a session that is alive but whose creation time does not match the registry
+               (pid reuse, or the field semantics changed)
+             - registry entries without `procStart` at all -> the pid-reuse guard is OFF
+             - a session we may not open (access denied) -> we cannot verify anything
 
 Exit code: 0 for ok/offline/degraded; 1 for error (only a broken mechanism should turn a
-monitor red). Whether `SendMessage` actually delivers is NOT verified here — this script
+monitor red). Whether `SendMessage` actually delivers is NOT verified here - this script
 cannot send; that check needs a real ping from an agent.
 
 **Read-only by default**: it sends nothing and writes nothing. Mirroring (which copies
@@ -28,13 +33,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import peer_mirror  # noqa: E402
 from peer_mirror import entries, load_roles, mirror  # noqa: E402
-from peer_resolve import find, proc_state  # noqa: E402
+from peer_resolve import as_pid, find, proc_state  # noqa: E402
 
 
 def probe(do_mirror: bool = False) -> dict:
@@ -42,9 +48,13 @@ def probe(do_mirror: bool = False) -> dict:
         "status": "ok",
         "roles": {},
         "config_dirs": [],
+        "missing_config_dirs": [],
         "stale_entries": [],
         "mismatched_entries": [],
+        "malformed_entries": [],
+        "unverifiable_entries": [],
         "errors": [],
+        "notes": [],
     }
 
     roles = load_roles()
@@ -55,10 +65,14 @@ def probe(do_mirror: bool = False) -> dict:
 
     for config_dir in peer_mirror.CONFIG_DIRS:
         if not (config_dir / "sessions").is_dir():
-            result["status"] = "error"
-            result["errors"].append(f"peer registry dir missing: {config_dir / 'sessions'}")
+            # not set up yet (or a wrong path) - not a broken mechanism
+            result["missing_config_dirs"].append(str(config_dir))
         else:
             result["config_dirs"].append(str(config_dir))
+    if result["missing_config_dirs"]:
+        result["notes"].append(
+            "no peer registry in: " + ", ".join(result["missing_config_dirs"])
+        )
 
     if do_mirror:
         try:
@@ -87,37 +101,75 @@ def probe(do_mirror: bool = False) -> dict:
             "other_sessions": max(0, len(hits) - 1),
         }
 
-    # registry entries vs reality: dead pid = stale; alive pid with a different creation
-    # time = the field semantics changed (or the pid was reused) -> mechanism break
+    # registry entries vs reality
     seen: set[int] = set()
+    verifiable = 0
     for config_dir in peer_mirror.CONFIG_DIRS:
         for _js, _key, payload in entries(config_dir):
-            pid = payload.get("pid")
-            if not isinstance(pid, int) or pid in seen:
+            pid = as_pid(payload)
+            if pid is None:
+                result["malformed_entries"].append(
+                    {"pid": payload.get("pid"), "name": payload.get("name"), "cwd": payload.get("cwd")}
+                )
+                continue
+            if pid in seen:
                 continue
             seen.add(pid)
             state = proc_state(pid, payload.get("procStart"))
-            if state in ("alive", "unknown"):
+            if state == "alive":
+                verifiable += 1
+                continue
+            if state == "unknown":
+                # alive, but no procStart -> the pid-reuse guard cannot work for this entry
+                result["unverifiable_entries"].append(
+                    {"pid": pid, "name": payload.get("name"), "cwd": payload.get("cwd")}
+                )
                 continue
             if state == "mismatch":
                 result["mismatched_entries"].append(
                     {"pid": pid, "name": payload.get("name"), "cwd": payload.get("cwd")}
                 )
-            else:
+            elif state == "denied":
+                result["unverifiable_entries"].append(
+                    {"pid": pid, "name": payload.get("name"), "cwd": payload.get("cwd")}
+                )
+            elif state == "unsupported":
+                result["status"] = "error"
+                result["errors"].append(
+                    "this platform has no Windows process API - the liveness probe cannot run"
+                )
+            else:  # dead / gone
                 result["stale_entries"].append(
                     {"pid": pid, "name": payload.get("name"), "cwd": payload.get("cwd")}
                 )
 
     if result["status"] != "error":
-        if result["mismatched_entries"]:
+        if result["malformed_entries"]:
+            result["status"] = "error"
+            result["errors"].append(
+                f"{len(result['malformed_entries'])} registry entr(y/ies) with a non-numeric pid - "
+                "the registry field type changed"
+            )
+        elif result["mismatched_entries"]:
             result["status"] = "error"
             result["errors"].append(
                 f"{len(result['mismatched_entries'])} live session(s) whose creation time does not "
                 "match the registry - pid reuse, or the registry field semantics changed"
             )
+        elif result["unverifiable_entries"]:
+            result["status"] = "error"
+            result["errors"].append(
+                f"{len(result['unverifiable_entries'])} session(s) cannot be verified "
+                "(no procStart in the registry, or access denied) - the pid-reuse guard is off"
+            )
+        elif live_any:
+            # a live peer is enough; dead pids alongside it are normal registry litter
+            result["status"] = "ok"
+            if result["stale_entries"]:
+                result["notes"].append(f"stale entries: {len(result['stale_entries'])}")
         elif result["stale_entries"]:
             result["status"] = "degraded"
-        elif not live_any:
+        else:
             result["status"] = "offline"
     return result
 
@@ -133,7 +185,8 @@ def summarize(result: dict) -> str:
         extra = f" (+{info['other_sessions']} more)" if info.get("other_sessions") else ""
         parts.append(f"{role}({info['display_name']}): {names}{extra}")
     tail = f"; stale entries: {len(result['stale_entries'])}" if result["stale_entries"] else ""
-    return f"peer channel {status}: " + " | ".join(parts) + tail
+    notes = ("; " + "; ".join(result["notes"])) if result.get("notes") else ""
+    return f"peer channel {status}: " + " | ".join(parts) + tail + notes
 
 
 def main() -> int:
@@ -143,6 +196,12 @@ def main() -> int:
     ap.add_argument("--config-dir", action="append", help="config dir to scan (repeatable)")
     ap.add_argument("--roles", help="roles json path")
     args = ap.parse_args()
+    if os.name != "nt":
+        print(
+            "peer_health needs Windows (NTFS junctions, named pipes, Windows process APIs).",
+            file=sys.stderr,
+        )
+        return 2
     if args.config_dir:
         peer_mirror.set_config_dirs(args.config_dir)
     if args.roles:

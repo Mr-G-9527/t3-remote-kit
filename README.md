@@ -123,8 +123,15 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.claude_minimax\sessions" -T
 
 ```bash
 # b) 各自独立：让脚本互抄条目（会写对端目录，见 §6）
+#    桌面侧必须知道两个目录，否则「互抄」无事可做：
+export PEER_CONFIG_DIRS="$HOME/.claude:$HOME/.claude_minimax"   # POSIX
+# PowerShell: $env:PEER_CONFIG_DIRS="$env:USERPROFILE\.claude;$env:USERPROFILE\.claude_minimax"
 python tools/peer_mirror.py
 ```
+
+> 桌面 CLI 的 `CLAUDE_CONFIG_DIR` 通常没设，所以**默认只有一个目录** → 互抄是空操作。
+> 要走这条路，必须显式给 `PEER_CONFIG_DIRS`（两个目录），或让手机侧把它自己的
+> `CLAUDE_CONFIG_DIR` 设好。脚本在只有一个目录时会打印提示，不会假装成功。
 
 **Step 2 — 写角色表**：改 `config/peers.json` 的 `cwd_match` 与 `entrypoints`
 （`cli` = 桌面 session，`t3-code` = T3 线程；同仓不同入口用入口区分）。
@@ -189,10 +196,15 @@ python tools/peer_resolve.py --role all --json
 `python tools/upstream_watch.py --check --strict`。
 
 **怎么贡献**：改 `tools/` / `skills/` / `docs/`，跑 `python -m pytest tools/ -q`，提 PR。
+（POSIX 上也能跑：只有那个直接调 Windows 进程 API 的用例会 skip；本套的判活逻辑是 Windows-only。）
 
-**怎么自检机制**：跑 `python tools/peer_health.py` → `error` 才是机制坏；`offline` 只是当前没人在线，
-`degraded` 是注册表有陈旧条目（不影响可用）。把它挂进你的夜巡/定时任务，
+**怎么自检机制**：跑 `python tools/peer_health.py` → `error` 才是机制坏；`ok` 是「有活着的 peer」
+（旁边有几个死 pid 不影响 ok）；`degraded` 是「没有活着的 peer，但注册表里还有陈旧条目」；
+`offline` 是「没人在线」或「这台机器还没装这套」。把它挂进你的夜巡/定时任务，
 **只有 `error` 才让监控红**。探针默认只读；`--mirror` 才会写对端目录。
+
+探针会认得这些「上游改了字段语义」的病，报 `error` 而不是「没事」：注册表里 `pid` 不是数字 /
+压根没有 `procStart`（**pid 复用守卫等于没开**）/ session 活着但创建时间对不上 / 进程打不开（权限不足）。
 
 **版本对账只是代理信号，不是机制保证**（这点要说清）：上游版本号变了，只说明「可能有事」；
 真正的机制信号是**跑在有活注册表的机器上的 `peer_health`**——它认得「session 活着但创建时间

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "note": "Role table for the peer channel. Identity = role, not session name / pid / thread title. Session names are auto-generated or change with /rename; pids get reused; none of them are stable identifiers. Edit cwd_match + entrypoints to match your own layout: `entrypoints` distinguishes a desktop CLI session ('cli') from a T3 Code thread ('t3-code').",
+  "note": "Role table for the peer channel. Identity = role, not session name / pid / thread title. Session names are auto-generated or change with /rename; pids get reused; none of them are stable identifiers. What the matcher uses: `cwd_match` (a path fragment, compared per path component, so 'my-repo' does NOT match 'my-repo-2'; put the full path to pin one checkout) and `entrypoints` ('cli' = desktop CLI session, 't3-code' = T3 thread). `repo` is informational only - a T3 thread runs in a worktree outside the repo path, so it cannot be a hard constraint.",
   "peers": {
     "desktop": {
       "display_name": "desktop",

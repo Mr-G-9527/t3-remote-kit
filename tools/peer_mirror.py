@@ -69,7 +69,10 @@ def set_peers_json(path: str | Path) -> None:
 
 
 def load_roles(path: Path | None = None) -> dict[str, dict]:
-    """Read the role table (repo + role + entrypoint). Empty dict if unreadable."""
+    """Read the role table (cwd_match + entrypoints; `repo` is informational).
+
+    Empty dict if unreadable.
+    """
     target = Path(path) if path else PEERS_JSON
     try:
         data = json.loads(target.read_text(encoding="utf-8"))
@@ -95,6 +98,12 @@ def entries(config_dir: Path) -> list[tuple[Path, Path | None, dict]]:
 
 
 def updated_at(payload: dict) -> int:
+    """Kept for reference only.
+
+    Freshness is decided by comparing file contents, not by a timestamp field: `updatedAt`
+    is not part of the registry contract we depend on, and a renamed/dropped field would
+    freeze the mirrored copy forever (stale names, stale pid-reuse guard).
+    """
     try:
         return int(payload.get("updatedAt") or 0)
     except (TypeError, ValueError):
@@ -128,10 +137,15 @@ def mirror(
     """Copy registry entries between config dirs. Returns (copied, skipped)."""
     dirs = dirs or CONFIG_DIRS
     copied = skipped = 0
+    if len(dirs) < 2 and not quiet:
+        print(
+            "only one Claude config dir known - nothing to mirror. Either share the sessions "
+            "registry (junction) or point PEER_CONFIG_DIRS at both dirs."
+        )
     for src_dir, dst_dir in zip(dirs, dirs[1:] + dirs[:1]):
         if not src_dir.is_dir() or not dst_dir.is_dir():
             continue
-        for js, key, payload in entries(src_dir):
+        for js, key, _payload in entries(src_dir):
             for f in [p for p in (js, key) if p is not None]:
                 dst = dst_dir / "sessions" / f.name
                 try:
@@ -141,10 +155,10 @@ def mirror(
                     pass
                 if dst.exists():
                     try:
-                        cur = json.loads(dst.read_text(encoding="utf-8"))
-                    except (OSError, ValueError):
-                        cur = {}
-                    if updated_at(cur) >= updated_at(payload):
+                        same = dst.read_bytes() == f.read_bytes()
+                    except OSError:
+                        same = False
+                    if same:
                         skipped += 1
                         continue
                 if not dry_run:

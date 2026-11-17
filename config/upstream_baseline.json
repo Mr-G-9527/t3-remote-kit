@@ -1,17 +1,21 @@
 {
   "checked_at": "2026-11-17T13:00:00+00:00",
-  "note": "Versions this kit was last reconciled against. Update only after a human read the upstream diff and confirmed the mechanism still holds.",
+  "note": "Versions this kit was last reconciled against. Update only after a human read the upstream diff and confirmed the mechanism still holds. Each component declares how it is fetched - adding a component is a change here, not in code. An unknown 'kind' or a component that cannot be fetched makes the watcher exit 2 ('could not check'), never 'no drift'.",
   "components": {
     "claude_code": {
+      "kind": "npm_version",
+      "package": "@anthropic-ai/claude-code",
+      "source": "https://registry.npmjs.org/@anthropic-ai/claude-code/latest",
       "version": "2.1.326",
       "compare": "major.minor",
-      "source": "https://registry.npmjs.org/@anthropic-ai/claude-code/latest",
       "why_it_matters": "peer registry fields (pid / procStart / cwd / entrypoint / messagingSocketPath), CLAUDE_CODE_ENTRYPOINT semantics, SendMessage addressing"
     },
     "t3_code": {
+      "kind": "github_release",
+      "repo": "pingdotgg/t3code",
+      "source": "https://api.github.com/repos/pingdotgg/t3code/releases/latest",
       "version": "v0.1.10",
       "compare": "exact",
-      "source": "https://api.github.com/repos/pingdotgg/t3code/releases/latest",
       "why_it_matters": "provider instance ids, model manifest format, thread/worktree behaviour, permission runtime modes"
     }
   }

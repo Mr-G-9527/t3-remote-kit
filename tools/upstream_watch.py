@@ -8,14 +8,20 @@ This kit breaks in two ways, and only two:
    behaviour.
 
 T3 ships a nightly every few hours; Claude Code ships patches constantly. Flagging every
-version bump would be noise, so the rules are:
+version bump would be noise, so each component declares its own comparison rule:
 
 - Claude Code -> compare **major.minor** only (patch releases rarely change the registry).
 - T3 Code   -> compare the **full release tag** (its stable line moves rarely).
 
-Sources:
-  - npm registry  https://registry.npmjs.org/@anthropic-ai/claude-code/latest
-  - GitHub        https://api.github.com/repos/pingdotgg/t3code/releases/latest
+Which components are watched is declared in `config/upstream_baseline.json` - not in this
+code. Each component says how to fetch it:
+
+    {"kind": "npm_version",   "package": "@anthropic-ai/claude-code", ...}
+    {"kind": "github_release", "repo":    "pingdotgg/t3code", ...}
+
+An unknown `kind`, a component that cannot be fetched, or a baseline component that this
+run did not check are all treated as **"could not check"** (exit 2), never as "no drift".
+That matters: a silently unwatched component would keep the alerting green forever.
 
 Usage:
     python tools/upstream_watch.py --check                    # print a report
@@ -24,7 +30,8 @@ Usage:
     python tools/upstream_watch.py --update-baseline          # only AFTER a human reconciliation
 
 Exit codes: 0 = no drift (or drift without --strict); 1 = drift and --strict;
-2 = could not check (network / baseline unreadable) — that is *not* drift, do not report it as such.
+2 = could not check (network / bad baseline / unknown component kind) - that is *not* drift,
+do not report it as such, and never let it look like a green check.
 """
 
 from __future__ import annotations
@@ -41,9 +48,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BASELINE = REPO_ROOT / "config" / "upstream_baseline.json"
 
-CLAUDE_CODE_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest"
-T3_RELEASE_URL = "https://api.github.com/repos/pingdotgg/t3code/releases/latest"
-
 
 def fetch_json(url: str, timeout: int = 15) -> dict:
     req = urllib.request.Request(url, headers={"User-Agent": "t3-remote-kit-upstream-watch"})
@@ -51,12 +55,21 @@ def fetch_json(url: str, timeout: int = 15) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def claude_code_version(fetcher=fetch_json) -> str:
-    return str(fetcher(CLAUDE_CODE_URL)["version"])
+def fetch_component(spec: dict, fetcher=None) -> str:
+    """Fetch the current version of one baseline component.
 
-
-def t3_release_tag(fetcher=fetch_json) -> str:
-    return str(fetcher(T3_RELEASE_URL)["tag_name"])
+    The component declares its own kind, so adding a component is a baseline change, not a
+    code change.
+    """
+    fetcher = fetcher or fetch_json
+    kind = spec.get("kind")
+    if kind == "npm_version":
+        url = spec.get("source") or f"https://registry.npmjs.org/{spec.get('package')}/latest"
+        return str(fetcher(url)["version"])
+    if kind == "github_release":
+        url = spec.get("source") or f"https://api.github.com/repos/{spec.get('repo')}/releases/latest"
+        return str(fetcher(url)["tag_name"])
+    raise ValueError(f"unknown component kind: {kind!r}")
 
 
 def major_minor(version: str) -> str:
@@ -67,7 +80,7 @@ def major_minor(version: str) -> str:
 
 def load_baseline(path: Path = DEFAULT_BASELINE) -> dict:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    if "components" not in data:
+    if not data.get("components"):
         raise ValueError("baseline file has no 'components'")
     return data
 
@@ -80,12 +93,13 @@ def build_drift(baseline: dict, current: dict) -> list[dict]:
     """Compare the baseline against the current upstream versions.
 
     `current` maps component -> version string. Each component in the baseline declares its
-    own comparison rule ('major.minor' or 'exact').
+    own comparison rule ('major.minor' or 'exact'). A baseline component that is missing
+    from `current` is an ERROR, not "nothing to compare": that would silently unwatch it.
     """
     drift: list[dict] = []
     for name, spec in (baseline.get("components") or {}).items():
         if name not in current:
-            continue
+            raise ValueError(f"baseline component {name!r} was not checked in this run")
         want = str(spec.get("version") or "")
         got = str(current[name])
         rule = spec.get("compare", "exact")
@@ -104,12 +118,13 @@ def build_drift(baseline: dict, current: dict) -> list[dict]:
     return drift
 
 
-def check(baseline: dict, claude_fetcher=fetch_json, t3_fetcher=fetch_json) -> dict:
-    """Collect current versions and diff them against the baseline."""
-    current = {
-        "claude_code": claude_code_version(claude_fetcher),
-        "t3_code": t3_release_tag(t3_fetcher),
-    }
+def check(baseline: dict, fetcher=None) -> dict:
+    """Collect current versions for every baseline component and diff them."""
+    fetcher = fetcher or fetch_json
+    components = baseline.get("components") or {}
+    if not components:
+        raise ValueError("baseline has no components")
+    current = {name: fetch_component(spec, fetcher) for name, spec in components.items()}
     return {
         "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "current": current,
@@ -178,7 +193,7 @@ def main() -> int:
         result = check(baseline)
     except (urllib.error.URLError, OSError, KeyError, ValueError) as exc:
         print(f"could not check upstream: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 2  # not drift: do not report a false alarm
+        return 2  # not drift: do not report a false alarm, do not look green
 
     if args.update_baseline:
         baseline["checked_at"] = result["checked_at"]
