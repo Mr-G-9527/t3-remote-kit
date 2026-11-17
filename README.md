@@ -162,7 +162,25 @@ python tools/peer_resolve.py --role all --json
 
 ---
 
-## 7. 适用范围与限制
+## 7. 维护状态与触发器
+
+| 项 | 值 |
+|---|---|
+| 最后对账 | 2026-11-17（对 Claude Code 的 peer registry 字段与 `CLAUDE_CODE_ENTRYPOINT` 语义） |
+| 机制性依赖 | registry 字段（`pid` / `procStart` / `cwd` / `entrypoint` / `messagingSocketPath`）、`CLAUDE_CODE_ENTRYPOINT` 语义、`SendMessage` 按名字寻址 |
+| 上游变动来源 | **Claude Code 更新**（registry 格式、寻址语义）；T3 更新（provider id、model manifest、thread/worktree 行为） |
+| 何时需要动 | 上面任一变了，或收到 issue |
+
+**维护节奏**：低频、按需。T3 每几小时一个 nightly 不构成更新理由——本套不依赖 T3 的新功能。
+只有上面那两类依赖真的变了，才需要改代码。
+
+**怎么贡献**：改 `tools/` / `skills/` / `docs/`，跑 `python -m pytest tools/ -q`，提 PR。
+
+**怎么自检机制**：跑 `python tools/peer_health.py` → `error` 才是机制坏；`offline` 只是当前没人在线，
+`degraded` 是注册表有陈旧条目（不影响可用）。把它挂进你的夜巡/定时任务，
+**只有 `error` 才让监控变红**。
+
+## 8. 适用范围与限制
 
 - **Windows-first**：依赖命名管道、junction、Windows 进程 API。macOS / Linux 未验证
   （`peer_resolve.py` 的判活那段需要改写成 POSIX 版本）。
