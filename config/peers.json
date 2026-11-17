@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "note": "Role table for the peer channel. Identity = role, not session name / pid / thread title. Session names are auto-generated or change with /rename; pids get reused; none of them are stable identifiers. Edit cwd_match + entrypoints to match your own layout: `entrypoints` distinguishes a desktop CLI session ('cli') from a T3 Code thread ('t3-code').",
+  "peers": {
+    "desktop": {
+      "display_name": "desktop",
+      "repo": "<absolute path to your repo>",
+      "cwd_match": "my-repo",
+      "entrypoints": ["cli"],
+      "describes": "Desktop Claude Code CLI session in your repo. Ask it implementation details it owns."
+    },
+    "mobile": {
+      "display_name": "mobile",
+      "repo": "<absolute path to your repo>",
+      "cwd_match": "my-repo",
+      "entrypoints": ["t3-code"],
+      "describes": "T3 Code thread (phone / web / desktop app) working in the same repo. Worktree threads run under <T3_HOME>/worktrees/<name>/<id>."
+    }
+  }
+}
