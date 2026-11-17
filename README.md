@@ -1,5 +1,7 @@
 # t3-remote-kit
 
+[![CI](https://github.com/Mr-G-9527/t3-remote-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/Mr-G-9527/t3-remote-kit/actions/workflows/ci.yml)
+
 > 让一台 T3 Code 线程和一台本机 Claude Code session **真的能对话、真的能交班**。
 
 **English abstract** — T3 Code (pingdotgg/t3code, MIT) is a *control plane* for AI agents: one
@@ -173,6 +175,12 @@ python tools/peer_resolve.py --role all --json
 
 **维护节奏**：低频、按需。T3 每几小时一个 nightly 不构成更新理由——本套不依赖 T3 的新功能。
 只有上面那两类依赖真的变了，才需要改代码。
+
+**自动化**：CI（`.github/workflows/ci.yml`）每次 push/PR 跑 Windows 上的测试；每周一自动对账
+上游版本 —— Claude Code 比 `major.minor`（补丁级不算漂移）、T3 Code 比完整 release tag，
+有漂移就开（或更新）一个 `upstream-drift` issue 提醒人工对账，对完再更新
+`config/upstream_baseline.json`。手动触发：`workflow_dispatch`，或本地
+`python tools/upstream_watch.py --check --strict`。
 
 **怎么贡献**：改 `tools/` / `skills/` / `docs/`，跑 `python -m pytest tools/ -q`，提 PR。
 

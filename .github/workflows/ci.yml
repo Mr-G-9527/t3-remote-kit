@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Mondays 04:17 UTC - weekly upstream reconciliation
+    - cron: "17 4 * * 1"
+
+jobs:
+  test:
+    # Windows-first kit: the liveness probe uses Windows process APIs (OpenProcess /
+    # GetExitCodeProcess) and the registry bridge relies on NTFS junctions.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: install pytest
+        run: python -m pip install --disable-pip-version-check pytest
+      - name: run tests
+        run: python -m pytest tools/ -q
+
+  upstream:
+    # Weekly reconciliation against the two upstreams that can actually break this kit.
+    # Not on every push: Claude Code ships patches constantly and that would be noise.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: check upstream drift
+        id: watch
+        continue-on-error: true
+        run: python tools/upstream_watch.py --check --report upstream-drift.json
+      - name: build issue body
+        if: hashFiles('upstream-drift.json') != ''
+        run: python tools/upstream_watch.py --issue-body upstream-drift.json > drift-body.md
+      - name: open or update the drift issue
+        if: hashFiles('upstream-drift.json') != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh label create upstream-drift --color B60205 \
+            --description "an upstream release may have broken this kit" 2>/dev/null || true
+          existing="$(gh issue list --label upstream-drift --state open --json number --jq '.[0].number' || true)"
+          if [ -n "$existing" ] && [ "$existing" != "null" ]; then
+            gh issue comment "$existing" --body-file drift-body.md
+          else
+            gh issue create --title "upstream drift: reconcile against Claude Code / T3 Code" \
+              --label upstream-drift --body-file drift-body.md
+          fi
