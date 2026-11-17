@@ -29,6 +29,7 @@ import argparse
 import ctypes
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -54,6 +55,20 @@ def proc_alive(pid: int, proc_start) -> bool:
     Never use `os.kill(pid, 0)` to test liveness on Windows: that calls TerminateProcess
     and kills the peer.
     """
+    return proc_state(pid, proc_start) in ("alive", "unknown")
+
+
+def proc_state(pid: int, proc_start) -> str:
+    """Liveness with a reason, so the health probe can tell problems apart.
+
+    - alive     : the process runs and its creation time matches the registry
+    - unknown   : the process runs but the registry has no `procStart` to compare
+    - mismatch  : the process runs but its creation time differs -> either the pid was
+                  reused, or the registry field semantics changed (that is a mechanism
+                  break, not a stale entry)
+    - dead      : the process is gone
+    - gone      : no such process / cannot open it
+    """
     kernel32 = ctypes.windll.kernel32
     kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
     kernel32.OpenProcess.restype = ctypes.c_void_p
@@ -64,7 +79,7 @@ def proc_alive(pid: int, proc_start) -> bool:
 
     handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
-        return False
+        return "gone"
     try:
         creation, exit_t, kernel_t, user_t = (FILETIME() for _ in range(4))
         exit_code = ctypes.c_ulong()
@@ -75,14 +90,16 @@ def proc_alive(pid: int, proc_start) -> bool:
             ctypes.byref(kernel_t),
             ctypes.byref(user_t),
         ):
-            return False
+            return "gone"
         if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-            return False
+            return "gone"
         if exit_code.value != STILL_ACTIVE:
-            return False
-        if proc_start and creation.as_int() != int(proc_start):
-            return False  # pid was reused -> different session
-        return True
+            return "dead"
+        if not proc_start:
+            return "unknown"
+        if creation.as_int() != int(proc_start):
+            return "mismatch"  # pid reused, or the registry field semantics changed
+        return "alive"
     finally:
         kernel32.CloseHandle(handle)
 
@@ -94,22 +111,44 @@ def caller_dir() -> Path:
 
 
 def read_entry(path: Path, retries: int = 10) -> dict | None:
-    """The registry file has a ~100ms hole while the harness rewrites it; retry."""
+    """The registry file has a ~100ms hole while the harness rewrites it; retry.
+
+    Retries on a partially written file too (JSONDecodeError is a ValueError): a half-written
+    entry must not be mistaken for "no entry".
+    """
     for _ in range(retries):
         try:
             return json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             time.sleep(0.05)
-        except (OSError, ValueError):
+        except ValueError:
+            time.sleep(0.05)
+        except OSError:
             return None
     return None
 
 
+def path_parts(path: str) -> list[str]:
+    return [p for p in re.split(r"[\\/]+", (path or "").lower()) if p]
+
+
+def contains_parts(haystack: list[str], needle: list[str]) -> bool:
+    """True if `needle` appears as a contiguous run of path components.
+
+    Component-wise, not substring: `my-repo` must not match `my-repo-2`.
+    """
+    if not needle or len(needle) > len(haystack):
+        return False
+    for i in range(len(haystack) - len(needle) + 1):
+        if haystack[i : i + len(needle)] == needle:
+            return True
+    return False
+
+
 def match(payload: dict, spec: dict) -> bool:
-    """Role match = cwd contains `cwd_match` AND entrypoint is listed."""
-    cwd = (payload.get("cwd") or "").lower()
-    marker = (spec.get("cwd_match") or "").lower()
-    if not marker or marker not in cwd:
+    """Role match = the repo path contains `cwd_match` as whole path components AND the
+    entrypoint is listed."""
+    if not contains_parts(path_parts(payload.get("cwd") or ""), path_parts(spec.get("cwd_match") or "")):
         return False
     entrypoints = spec.get("entrypoints")
     if entrypoints and payload.get("entrypoint") not in entrypoints:
@@ -129,24 +168,27 @@ def find(role: str, spec: dict) -> list[dict]:
                 continue
             if not match(payload, spec):
                 continue
-            if not proc_alive(pid, payload.get("procStart")):
+            state = proc_state(pid, payload.get("procStart"))
+            if state in ("dead", "gone"):
                 continue
             seen.add(pid)
             local = read_entry(cdir / "sessions" / f"{pid}.json")
-            name = (local or {}).get("name") or payload.get("name") or spec.get("display_name")
+            # a session name only — never fall back to the role label: that is not an address
+            name = (local or {}).get("name") or payload.get("name")
             hits.append(
                 {
                     "role": role,
                     "pid": pid,
                     "name": name,
+                    "state": state,
                     "named": name == spec.get("display_name"),
                     "cwd": payload.get("cwd"),
                     "entrypoint": payload.get("entrypoint"),
                     "started": int(payload.get("procStart") or 0),
                 }
             )
-    # name matching the role wins; otherwise newest
-    hits.sort(key=lambda h: (h["named"], h["started"]), reverse=True)
+    # name matching the role wins, then a healthy process, then the newest
+    hits.sort(key=lambda h: (h["named"], h["state"] == "alive", h["started"]), reverse=True)
     return hits
 
 
@@ -159,7 +201,8 @@ def find_by_pid(pid: int) -> list[dict]:
         for _js, _key, payload in entries(config_dir):
             if payload.get("pid") != pid or pid in seen:
                 continue
-            if not proc_alive(pid, payload.get("procStart")):
+            state = proc_state(pid, payload.get("procStart"))
+            if state in ("dead", "gone"):
                 continue
             seen.add(pid)
             local = read_entry(cdir / "sessions" / f"{pid}.json")
@@ -169,6 +212,7 @@ def find_by_pid(pid: int) -> list[dict]:
                     "role": None,
                     "pid": pid,
                     "name": name,
+                    "state": state,
                     "named": False,
                     "cwd": payload.get("cwd"),
                     "entrypoint": payload.get("entrypoint"),
@@ -211,6 +255,9 @@ def main() -> int:
         if not hits:
             print(f"pid {args.pid}: no live session in registry", file=sys.stderr)
             return 1
+        if not hits[0].get("name"):
+            print(f"pid {args.pid}: session is alive but has no addressable name", file=sys.stderr)
+            return 2
         print(json.dumps(hits, ensure_ascii=False, indent=1) if args.json else hits[0]["name"])
         return 0
 
@@ -240,8 +287,16 @@ def main() -> int:
 
     hits = find(args.role, spec)
     if not hits:
-        print(f"{args.role}: no live session right now", file=sys.stderr)
+        print(
+            f"{args.role}: no live session right now "
+            f"(role table matched nothing — check cwd_match vs this machine's paths and "
+            f"entrypoints vs the entry type)",
+            file=sys.stderr,
+        )
         return 1
+    if not hits[0].get("name"):
+        print(f"{args.role}: session is alive but has no addressable name", file=sys.stderr)
+        return 2
     if args.json:
         print(json.dumps(hits, ensure_ascii=False, indent=1))
     else:

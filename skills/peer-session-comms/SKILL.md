@@ -40,6 +40,8 @@ Windows 上两边各有一个配置目录（桌面 `~/.claude`，手机侧隔离
 要让两边互相发现，**只共享 sessions 注册表**：
 
 ```powershell
+# 先把原来的目录挪走（这就是回滚备份），再建 junction
+Move-Item "$env:USERPROFILE\.claude_minimax\sessions" "$env:USERPROFILE\.claude_minimax\sessions.bak-$(Get-Date -Format yyyyMMdd-HHmm)"
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.claude_minimax\sessions" -Target "$env:USERPROFILE\.claude\sessions"
 ```
 
@@ -81,4 +83,5 @@ t3 thread send <thread-id> -      # 正文走 stdin，UTF-8 字节
 1. **解析**：`peer_resolve.py --role <role>` 退出码 0，拿到名字。
 2. **发**：`SendMessage(to=<那个名字>)`，正文第一句带意图，第二句带期望回什么。
 3. **验**：对面接住后要**回一句**才算通；只看到「已发送」不算。回不来先跑 `peer_health.py`：
-   `ok`/`offline` 是机制正常，`error` 才是机制坏了。
+   `ok`/`offline` 是机制正常，`degraded` 是注册表有陈旧条目（不影响可用），**只有 `error` 才是
+   机制坏了**（含「session 活着但创建时间对不上」这种上游改字段语义的情况）。

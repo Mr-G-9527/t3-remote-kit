@@ -46,7 +46,7 @@ T3 Code **不是** AI 模型，也不是 harness（Claude Code、Codex 这类真
 | P2 | **送不到**：手机线程用 `~/.claude_minimax`，本地用 `~/.claude`，两个 harness 的 peer 注册表互不可见 | Claude Code 的 peer 注册表在 `CLAUDE_CONFIG_DIR` 下，各写各的 | **共享注册表**（Windows junction，把两台「对讲机」插到同一频道）或 **互抄兜底**（`peer_mirror.py`）。底层是机器全局的命名管道，**不用改 provider 配置** |
 | P3 | **交班丢状态**：你下班前想把手上的活挪到手机上继续 | 换面 = 新建线程 + 交**状态**（T3 接不了已在跑的进程）；而线程默认 worktree，主工作区未提交的文件它读不到 → **交接静默降级**成「按缺前提开工」 | **五块交班条**（目标/已知事实带证据/已做未做/下一步第一条命令/预判疑问+默认答案）+ **可见性三选一**（默认不加 `--worktree` / 先 commit / 读不到就内联进首条消息）+ **0–3 轮回问**协议 |
 | P4 | **手机上的 agent 不知道自己在手机上**：它按桌面节奏写长回复、跳过拍板、直接改共享文件 | 手机上没法滚屏，没法随时盯着 | **SessionStart hook**：命中 `CLAUDE_CODE_ENTRYPOINT=t3-code` 就内联手机纪律（一屏内 / 拍板单 / 软拒旋转门 / 动共享文件前看 mtime）。规则不赌召回——**内联文本**，不只给一个 memory 名 |
-| P5 | **机制坏了没人知道**：某天通道不通了，两边各自猜 | 没有探针时，「叫不到人」和「机制坏了」长得很像 | **`peer_health.py`**：判**机制**健不健（`ok` / `offline` 正常 / `degraded` 陈旧条目 / `error` 机制坏），可挂夜巡；只有机制坏才让监控红 |
+| P5 | **机制坏了没人知道**：某天通道不通了，两边各自猜 | 没有探针时，「叫不到人」和「机制坏了」长得很像 | **`peer_health.py`**：判**机制**健不健（`ok` / `offline` 正常 / `degraded` 陈旧条目 / `error` 机制坏），可挂夜巡；只有机制坏才让监控红。**它还认得一种病**：session 活着但注册表里的创建时间对不上 → 那是上游改了字段语义 → 报 `error`，不是「陈旧条目」 |
 
 ---
 
@@ -97,7 +97,7 @@ T3 Code **不是** AI 模型，也不是 harness（Claude Code、Codex 这类真
 |---|---|
 | `tools/peer_resolve.py` | 角色 → 当前活着的 peer 名字（喂给 `SendMessage`）。`--role` / `--role all --json` / `--pid`（解析「自己」）/ `--no-mirror`（只读） |
 | `tools/peer_mirror.py` | 两个配置目录的 peer 注册条目互抄（junction 共享后的兜底） |
-| `tools/peer_health.py` | 只读健康探针：`ok` / `offline` / `degraded` / `error` |
+| `tools/peer_health.py` | 健康探针：**默认只读**（不发消息、不写文件；`--mirror` 才写）。`ok` / `offline` / `degraded` / `error`（机制坏，或注册表字段语义变了） |
 | `config/peers.json` | 角色真源模板（改成你自己的仓与入口） |
 | `skills/peer-session-comms/` | 对讲 skill：选通道、寻址、坑 |
 | `skills/session-handoff-t3/` | 交接 skill：五块交班条、可见性、0–3 轮 |
@@ -116,11 +116,13 @@ T3 Code **不是** AI 模型，也不是 harness（Claude Code、Codex 这类真
 
 ```powershell
 # a) 共享注册表（推荐）：手机侧的 sessions 目录做 junction，指向桌面侧
+#    先把原来那个目录挪走（这一步就是回滚用的备份，别删）
+Move-Item "$env:USERPROFILE\.claude_minimax\sessions" "$env:USERPROFILE\.claude_minimax\sessions.bak-$(Get-Date -Format yyyyMMdd-HHmm)"
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.claude_minimax\sessions" -Target "$env:USERPROFILE\.claude\sessions"
 ```
 
 ```bash
-# b) 各自独立：让脚本互抄条目
+# b) 各自独立：让脚本互抄条目（会写对端目录，见 §6）
 python tools/peer_mirror.py
 ```
 
@@ -156,6 +158,10 @@ python tools/peer_resolve.py --role all --json
   （provider base URL / token / 模型映射互相覆盖，桌面 session 会在两个 provider 之间被切）。
   只共享 `sessions/`。
 - **只读场景必须加 `--no-mirror`**：默认会写 registry。在「只读轮次」里跑它属于越权写入。
+  （`peer_health.py` 默认不镜像，所以它可以安全挂夜巡；`peer_resolve.py` 默认会镜像。）
+- **镜像会复制 token 文件**：`peer_mirror.py` 复制的是 `<pid>.json` **和** `<pid>.<token>.key`——
+  对端要靠它才能被寻址。写的是另一个 harness 的配置目录，不是仓库，但请知道这件事。
+  镜像写入是**原子替换**（临时文件 + rename），不会让对面读到半截 JSON。
 - **T3 线程默认 worktree**：主工作区**未提交**的文件在线程里读不到 → 交接静默降级。
 - **审批档**：手机端批不了 `approval-required` 的线程（会卡住等审批）→ 用 `full-access`，
   只读约束写进消息文本。
@@ -186,7 +192,15 @@ python tools/peer_resolve.py --role all --json
 
 **怎么自检机制**：跑 `python tools/peer_health.py` → `error` 才是机制坏；`offline` 只是当前没人在线，
 `degraded` 是注册表有陈旧条目（不影响可用）。把它挂进你的夜巡/定时任务，
-**只有 `error` 才让监控变红**。
+**只有 `error` 才让监控红**。探针默认只读；`--mirror` 才会写对端目录。
+
+**版本对账只是代理信号，不是机制保证**（这点要说清）：上游版本号变了，只说明「可能有事」；
+真正的机制信号是**跑在有活注册表的机器上的 `peer_health`**——它认得「session 活着但创建时间
+对不上」这种上游改字段语义的情况并报 `error`。CI 里的版本对账负责**提醒你去看**，
+`peer_health` 负责**告诉你坏没坏**。
+
+⚠ GitHub 会在**仓库 60 天无活动后自动停用定时 workflow**。想保住每周对账，就让仓库保持活动
+（改文档、回 issue 都算），或从外部 cron 调 `workflow_dispatch`。
 
 ## 8. 适用范围与限制
 

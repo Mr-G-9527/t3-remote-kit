@@ -32,6 +32,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 HOME = Path(os.environ.get("USERPROFILE") or Path.home())
@@ -100,6 +101,25 @@ def updated_at(payload: dict) -> int:
         return 0
 
 
+def atomic_copy(src: Path, dst: Path) -> None:
+    """Copy into place atomically.
+
+    `shutil.copy2` truncates the destination and writes it in place: a reader in the other
+    harness can see a half-written JSON file (that is the ~100ms hole). Write a temp file
+    next to the target and rename it over — rename is atomic on NTFS.
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(dst.parent), prefix=dst.name + ".", suffix=".tmp")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dst)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
 def mirror(
     dry_run: bool = False,
     quiet: bool = False,
@@ -128,8 +148,7 @@ def mirror(
                         skipped += 1
                         continue
                 if not dry_run:
-                    dst_dir.joinpath("sessions").mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(f, dst)
+                    atomic_copy(f, dst)
                 copied += 1
                 if not quiet:
                     print(f"{'would copy' if dry_run else 'copied'}: {f.name} -> {dst_dir.name}")

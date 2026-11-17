@@ -9,6 +9,10 @@ on:
     # Mondays 04:17 UTC - weekly upstream reconciliation
     - cron: "17 4 * * 1"
 
+# Default: read-only. The upstream job asks for issues: write explicitly.
+permissions:
+  contents: read
+
 jobs:
   test:
     # Windows-first kit: the liveness probe uses Windows process APIs (OpenProcess /
@@ -39,7 +43,10 @@ jobs:
           python-version: "3.11"
       - name: check upstream drift
         id: watch
-        continue-on-error: true
+        # Exit 0 = no drift (or drift, with a report written); exit 2 = could not check.
+        # A "could not check" must NOT look green: no continue-on-error here on purpose.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python tools/upstream_watch.py --check --report upstream-drift.json
       - name: build issue body
         if: hashFiles('upstream-drift.json') != ''
@@ -52,10 +59,24 @@ jobs:
           set -euo pipefail
           gh label create upstream-drift --color B60205 \
             --description "an upstream release may have broken this kit" 2>/dev/null || true
-          existing="$(gh issue list --label upstream-drift --state open --json number --jq '.[0].number' || true)"
-          if [ -n "$existing" ] && [ "$existing" != "null" ]; then
-            gh issue comment "$existing" --body-file drift-body.md
+          existing="$(gh issue list --label upstream-drift --state open --json number --jq '.[].number')"
+          if [ -n "$existing" ]; then
+            first="$(echo "$existing" | head -1)"
+            gh issue comment "$first" --body-file drift-body.md
+            echo "$existing" | tail -n +2 | while read -r n; do
+              [ -n "$n" ] && gh issue close "$n" --comment "duplicate of #$first"
+            done
           else
             gh issue create --title "upstream drift: reconcile against Claude Code / T3 Code" \
               --label upstream-drift --body-file drift-body.md
           fi
+      - name: close the issue once the drift is gone
+        if: hashFiles('upstream-drift.json') == ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          existing="$(gh issue list --label upstream-drift --state open --json number --jq '.[].number')"
+          for n in $existing; do
+            gh issue close "$n" --comment "no drift on this run - upstream matches the baseline again"
+          done

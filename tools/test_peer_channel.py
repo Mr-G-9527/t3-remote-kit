@@ -28,6 +28,29 @@ class PeerChannelTests(unittest.TestCase):
         # right entrypoint, wrong repo does not match
         self.assertFalse(peer_resolve.match({"cwd": "C:\\other", "entrypoint": "cli"}, spec))
 
+    def test_match_is_component_wise_not_substring(self):
+        spec = {"cwd_match": "my-repo", "entrypoints": ["cli"]}
+        # a different repo whose name merely starts with the marker must not match
+        self.assertFalse(peer_resolve.match({"cwd": "C:\\ws\\my-repo-2", "entrypoint": "cli"}, spec))
+        self.assertFalse(peer_resolve.match({"cwd": "C:\\ws\\my-repo-old", "entrypoint": "cli"}, spec))
+        # the marker may sit anywhere in the path, as whole components
+        self.assertTrue(
+            peer_resolve.match({"cwd": "C:\\ws\\archive\\my-repo", "entrypoint": "cli"}, spec)
+        )
+
+    def test_match_handles_t3_worktree_paths(self):
+        spec = {"cwd_match": ".t3\\worktrees\\myrepo", "entrypoints": ["t3-code"]}
+        self.assertTrue(
+            peer_resolve.match(
+                {"cwd": "C:\\ws\\.t3\\worktrees\\myrepo\\abc123", "entrypoint": "t3-code"}, spec
+            )
+        )
+        self.assertFalse(
+            peer_resolve.match(
+                {"cwd": "C:\\ws\\.t3\\worktrees\\otherrepo\\abc123", "entrypoint": "t3-code"}, spec
+            )
+        )
+
     def test_find_prefers_named_peer_then_newest(self):
         spec = {"cwd_match": "my-repo", "entrypoints": ["cli"], "display_name": "desktop"}
         peers = [
@@ -36,7 +59,7 @@ class PeerChannelTests(unittest.TestCase):
             {"pid": 3, "name": "newer", "cwd": "C:\\ws\\my-repo", "entrypoint": "cli", "procStart": 99},
         ]
         with mock.patch.object(peer_resolve, "entries", return_value=[(None, None, p) for p in peers]), \
-             mock.patch.object(peer_resolve, "proc_alive", return_value=True), \
+             mock.patch.object(peer_resolve, "proc_state", return_value="alive"), \
              mock.patch.object(peer_resolve, "read_entry", return_value=None):
             hits = peer_resolve.find("desktop", spec)
         self.assertEqual(hits[0]["pid"], 2)  # the named one wins even if it is not the newest
@@ -44,11 +67,29 @@ class PeerChannelTests(unittest.TestCase):
     def test_find_by_pid_ignores_role_table(self):
         peers = [{"pid": 7, "name": "me", "cwd": "C:\\ws\\my-repo", "entrypoint": "cli", "procStart": 3}]
         with mock.patch.object(peer_resolve, "entries", return_value=[(None, None, p) for p in peers]), \
-             mock.patch.object(peer_resolve, "proc_alive", return_value=True), \
+             mock.patch.object(peer_resolve, "proc_state", return_value="alive"), \
              mock.patch.object(peer_resolve, "read_entry", return_value=None):
             hits = peer_resolve.find_by_pid(7)
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0]["name"], "me")
+
+    def test_find_never_falls_back_to_the_role_label(self):
+        # a session with no name in any registry is not addressable -> name must stay None
+        spec = {"cwd_match": "my-repo", "entrypoints": ["cli"], "display_name": "desktop"}
+        peers = [{"pid": 8, "cwd": "C:\\ws\\my-repo", "entrypoint": "cli", "procStart": 3}]
+        with mock.patch.object(peer_resolve, "entries", return_value=[(None, None, p) for p in peers]), \
+             mock.patch.object(peer_resolve, "proc_state", return_value="alive"), \
+             mock.patch.object(peer_resolve, "read_entry", return_value=None):
+            hits = peer_resolve.find("desktop", spec)
+        self.assertIsNone(hits[0]["name"])
+        self.assertNotEqual(hits[0]["name"], "desktop")
+
+    def test_read_entry_retries_a_partially_written_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "1.json"
+            path.write_text('{"pid": 1, "na', encoding="utf-8")  # half written
+            with mock.patch.object(peer_resolve.time, "sleep"):
+                self.assertIsNone(peer_resolve.read_entry(path, retries=3))
 
     def test_mirror_copies_json_and_key_both_ways(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -65,6 +106,15 @@ class PeerChannelTests(unittest.TestCase):
             self.assertTrue((b / "sessions" / "42.json").exists())
             self.assertTrue((b / "sessions" / "42.tok.key").exists())
             self.assertEqual(json.loads((b / "sessions" / "42.json").read_text(encoding="utf-8")), payload)
+
+    def test_mirror_writes_atomically_and_leaves_no_temp_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "src.json"
+            dst = Path(tmp) / "dst.json"
+            src.write_text(json.dumps({"pid": 1}), encoding="utf-8")
+            peer_mirror.atomic_copy(src, dst)
+            self.assertEqual(json.loads(dst.read_text(encoding="utf-8")), {"pid": 1})
+            self.assertEqual([p.name for p in Path(tmp).glob("*.tmp")], [])
 
     def test_mirror_skips_when_dirs_share_one_registry(self):
         # junction case: dst resolves to the same file -> nothing copied
@@ -93,6 +143,7 @@ class PeerChannelTests(unittest.TestCase):
             time.sleep(0.3)
             self.assertTrue(peer_resolve.proc_alive(proc.pid, None))
             self.assertFalse(peer_resolve.proc_alive(proc.pid, "12345"))
+            self.assertEqual(peer_resolve.proc_state(proc.pid, "12345"), "mismatch")
         finally:
             proc.terminate()
 
